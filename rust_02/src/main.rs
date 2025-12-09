@@ -262,4 +262,5 @@ fn run_write(path: &PathBuf, offset: u64, hex: &str) {
     println!("Writing {} bytes at offset 0x{:08x}", bytes.len(), offset);
     println!("Hex: {}", bytes_to_spaced_hex(&bytes));
     println!("ASCII: {}", bytes_to_ascii(&bytes));
+    println!("Successfully written");
 }
