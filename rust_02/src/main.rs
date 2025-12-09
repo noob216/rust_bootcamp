@@ -20,7 +20,12 @@ struct Cli {
     read: bool,
 
     /// Write mode (hex string to write)
-    #[arg(short = 'w', long = "write", value_name = "HEX", conflicts_with = "read")]
+    #[arg(
+        short = 'w',
+        long = "write",
+        value_name = "HEX",
+        conflicts_with = "read"
+    )]
     write: Option<String>,
 
     /// Offset in bytes (decimal or 0x hex)
@@ -62,7 +67,6 @@ fn parse_u64_dec_or_hex(raw: &str) -> Result<u64, String> {
         }
         s.parse::<u64>()
             .map_err(|_| format!("invalid number '{raw}' (expected decimal or 0x hex)"))
-
     }
 }
 
@@ -84,7 +88,13 @@ fn bytes_to_spaced_hex(bytes: &[u8]) -> String {
 fn bytes_to_ascii(bytes: &[u8]) -> String {
     bytes
         .iter()
-        .map(|&b| if is_printable_ascii(b) { b as char } else { '.' })
+        .map(|&b| {
+            if is_printable_ascii(b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
         .collect()
 }
 
@@ -104,9 +114,8 @@ fn parse_hex_string_to_bytes(input: &str) -> Result<Vec<u8>, String> {
         return Err("hex string is empty".to_string());
     }
     if !cleaned.len().is_multiple_of(2) {
-    return Err("hex string must have an even number of digits".to_string());
-}
-
+        return Err("hex string must have an even number of digits".to_string());
+    }
 
     fn hex_val(b: u8) -> Option<u8> {
         match b {
@@ -139,7 +148,9 @@ fn main() {
         return;
     }
 
-    let file_path = cli.file.unwrap_or_else(|| die("--file is required (try --help)"));
+    let file_path = cli
+        .file
+        .unwrap_or_else(|| die("--file is required (try --help)"));
     let offset = cli.offset.unwrap_or(0);
 
     let mode_read = cli.read;
@@ -210,15 +221,16 @@ fn run_read(path: &PathBuf, offset: u64, size: Option<u64>) {
 }
 
 fn run_write(path: &PathBuf, offset: u64, hex: &str) {
-    let bytes = parse_hex_string_to_bytes(hex).unwrap_or_else(|e| die(&format!("invalid hex: {e}")));
+    let bytes =
+        parse_hex_string_to_bytes(hex).unwrap_or_else(|e| die(&format!("invalid hex: {e}")));
 
     let mut file = OpenOptions::new()
-    .create(true)
-    .read(true)
-    .write(true)cargo clippy -- -D warnings
-    .truncate(false) 
-    .open(path)
-    .unwrap_or_else(|e| die(&format!("failed to open file '{:?}': {e}", path)));
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .unwrap_or_else(|e| die(&format!("failed to open file '{:?}': {e}", path)));
 
     let len = file
         .metadata()

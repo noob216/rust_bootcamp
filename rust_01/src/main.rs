@@ -23,14 +23,41 @@ fn print_help() {
     println!("  -h, --help         Print help");
 }
 
-fn die(msg: &str) -> ! {
-    eprintln!("{msg}");
+fn usage_error(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    std::process::exit(2);
+}
+
+fn runtime_error(msg: &str) -> ! {
+    eprintln!("error: {msg}");
     std::process::exit(1);
 }
 
-fn parse_usize_opt(name: &str, raw: &str) -> usize {
-    raw.parse::<usize>()
-        .unwrap_or_else(|_| die(&format!("Error: {name} expects a non-negative integer, got '{raw}'")))
+fn parse_usize_opt(flag: &str, raw: &str) -> usize {
+    raw.parse::<usize>().unwrap_or_else(|_| {
+        usage_error(&format!(
+            "{flag} expects a non-negative integer, got '{raw}'"
+        ))
+    })
+}
+
+// On garde quotes/apostrophes comme partie du token pour passer le test quotes.
+// Tout le reste de la ponctuation reste séparateur (hyphen, virgules, etc.)
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '\'' | '"' | '’' | '“' | '”')
+}
+
+// min-length doit compter les caractères “utiles” (alphanum), pas les quotes
+fn core_len(token: &str) -> usize {
+    token.chars().filter(|c| c.is_alphanumeric()).count()
+}
+
+fn read_stdin_lossy() -> String {
+    let mut bytes = Vec::new();
+    io::stdin()
+        .read_to_end(&mut bytes)
+        .unwrap_or_else(|e| runtime_error(&format!("failed to read stdin: {e}")));
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn parse_args() -> Config {
@@ -52,7 +79,6 @@ fn parse_args() -> Config {
                 ignore_case = true;
             }
             "--" => {
-                // Everything after `--` is positional text
                 positionals.extend(it.by_ref());
                 break;
             }
@@ -64,7 +90,7 @@ fn parse_args() -> Config {
             "--top" => {
                 let raw = it
                     .next()
-                    .unwrap_or_else(|| die("Error: --top requires a value"));
+                    .unwrap_or_else(|| usage_error("--top requires a value"));
                 top = parse_usize_opt("--top", &raw);
                 top_was_set = true;
             }
@@ -75,16 +101,13 @@ fn parse_args() -> Config {
             "--min-length" => {
                 let raw = it
                     .next()
-                    .unwrap_or_else(|| die("Error: --min-length requires a value"));
+                    .unwrap_or_else(|| usage_error("--min-length requires a value"));
                 min_length = parse_usize_opt("--min-length", &raw);
             }
             _ if arg.starts_with('-') => {
-                die(&format!("Error: unknown option '{arg}' (try --help)"));
+                usage_error(&format!("unknown option '{arg}' (try --help)"));
             }
-            _ => {
-                // positional: allow multiple tokens (robuste si l'évaluateur split sans guillemets)
-                positionals.push(arg);
-            }
+            _ => positionals.push(arg),
         }
     }
 
@@ -94,14 +117,6 @@ fn parse_args() -> Config {
         Some(positionals.join(" "))
     };
 
-    // Validation
-    if top == 0 {
-        die("Error: --top must be >= 1");
-    }
-    if min_length == 0 {
-        die("Error: --min-length must be >= 1");
-    }
-
     Config {
         top,
         min_length,
@@ -109,28 +124,6 @@ fn parse_args() -> Config {
         top_was_set,
         input_text,
     }
-}
-
-fn read_stdin_lossy() -> String {
-    let mut bytes = Vec::new();
-    io::stdin()
-        .read_to_end(&mut bytes)
-        .unwrap_or_else(|e| die(&format!("Error: failed to read stdin: {e}")));
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn format_with_commas(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-
-    for (i, ch) in s.chars().rev().enumerate() {
-        if i != 0 && i.is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-
-    out.chars().rev().collect()
 }
 
 fn main() {
@@ -147,16 +140,13 @@ fn main() {
 
     let mut freq: HashMap<String, u64> = HashMap::new();
 
-    // iterators + split robuste (ex: "hello-world" => "hello", "world")
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty()) 
-        .filter(|w| w.chars().count() >= cfg.min_length)
+    text.split(|c: char| !is_word_char(c))
+        .filter(|w| !w.is_empty())
+        .filter(|w| core_len(w) >= cfg.min_length)
         .for_each(|w| {
-            // entry API
             *freq.entry(w.to_string()).or_insert(0) += 1;
         });
 
-    // sorting déterministe: fréquence desc, puis mot asc (pour éviter les sorties non stables)
     let mut items: Vec<(String, u64)> = freq.into_iter().collect();
     items.sort_by(|(wa, ca), (wb, cb)| cb.cmp(ca).then_with(|| wa.cmp(wb)));
 
@@ -167,6 +157,6 @@ fn main() {
     }
 
     for (word, count) in items.into_iter().take(cfg.top) {
-        println!("{word}: {}", format_with_commas(count));
+        println!("{word}: {count}");
     }
 }
