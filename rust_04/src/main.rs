@@ -78,9 +78,7 @@ fn entry(cli: Cli) -> Result<(), Exit> {
         ));
     }
     if cli.output.is_some() && cli.generate.is_none() {
-        return Err(Exit::Cli(
-            "--output requires --generate WxH".to_string(),
-        ));
+        return Err(Exit::Cli("--output requires --generate WxH".to_string()));
     }
 
     // Génération map aléatoire
@@ -112,12 +110,7 @@ fn entry(cli: Cli) -> Result<(), Exit> {
     analyze_and_print(&grid, cli.visualize, cli.both, cli.animate)
 }
 
-fn analyze_and_print(
-    grid: &Grid,
-    visualize: bool,
-    both: bool,
-    animate: bool,
-) -> Result<(), Exit> {
+fn analyze_and_print(grid: &Grid, visualize: bool, both: bool, animate: bool) -> Result<(), Exit> {
     validate_grid(grid).map_err(Exit::Cli)?;
 
     println!("Analyzing hexadecimal grid...");
@@ -197,8 +190,14 @@ fn parse_wh(s: &str) -> Result<(usize, usize), String> {
         .split_once('x')
         .or_else(|| s.split_once('X'))
         .ok_or_else(|| format!("invalid size '{s}' (expected WxH, e.g. 10x10)"))?;
-    let w: usize = w_s.trim().parse().map_err(|_| format!("invalid width in '{s}'"))?;
-    let h: usize = h_s.trim().parse().map_err(|_| format!("invalid height in '{s}'"))?;
+    let w: usize = w_s
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid width in '{s}'"))?;
+    let h: usize = h_s
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid height in '{s}'"))?;
     if w == 0 || h == 0 {
         return Err("width and height must be > 0".to_string());
     }
@@ -370,7 +369,10 @@ fn dijkstra_min_cost(grid: &Grid) -> Result<(u64, Vec<(usize, usize)>), String> 
     let mut heap = BinaryHeap::new();
 
     dist[start] = 0;
-    heap.push(State { cost: 0, idx: start });
+    heap.push(State {
+        cost: 0,
+        idx: start,
+    });
 
     while let Some(State { cost, idx }) = heap.pop() {
         if cost != dist[idx] {
@@ -390,7 +392,10 @@ fn dijkstra_min_cost(grid: &Grid) -> Result<(u64, Vec<(usize, usize)>), String> 
             if next < dist[nidx] {
                 dist[nidx] = next;
                 prev[nidx] = Some(idx);
-                heap.push(State { cost: next, idx: nidx });
+                heap.push(State {
+                    cost: next,
+                    idx: nidx,
+                });
             }
         }
     }
@@ -441,15 +446,15 @@ fn max_cost_among_shortest_paths(grid: &Grid) -> Option<(u64, Vec<(usize, usize)
     best[start] = 0;
 
     let mut layers: Vec<Vec<usize>> = vec![Vec::new(); (goal_d as usize) + 1];
-    for i in 0..n {
-        let d = step[i];
+    for (i, &d) in step.iter().enumerate() {
         if d != i32::MAX {
             layers[d as usize].push(i);
         }
     }
 
-    for d in 0..(goal_d as usize) {
-        for &idx in &layers[d] {
+    let limit = goal_d as usize;
+    for (d, layer) in layers.iter().enumerate().take(limit) {
+        for &idx in layer {
             if best[idx] == i64::MIN {
                 continue;
             }
