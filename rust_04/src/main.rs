@@ -1,5 +1,5 @@
 use clap::Parser;
-use rand::Rng;
+use rand::RngCore;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
 use std::fs;
@@ -7,7 +7,7 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 const MAX_SIDE: usize = 512;
-const MAX_CELLS: usize = 512 * 512;
+const MAX_CELLS: usize = MAX_SIDE * MAX_SIDE;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long = "both")]
     both: bool,
 
-    /// Animate pathfinding (lightweight)
+    /// Animate pathfinding
     #[arg(long = "animate")]
     animate: bool,
 
@@ -43,7 +43,7 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    let exit = match entry(cli) {
+    let code = match entry(cli) {
         Ok(()) => 0,
         Err(Exit::Cli(msg)) => {
             eprintln!("error: {msg}");
@@ -55,7 +55,7 @@ fn main() {
         }
     };
 
-    std::process::exit(exit);
+    std::process::exit(code);
 }
 
 enum Exit {
@@ -63,8 +63,10 @@ enum Exit {
     Runtime(String),
 }
 
+/*CLI / ENTRY*/
+
 fn entry(cli: Cli) -> Result<(), Exit> {
-    // Validation “runner-proof”
+    // Validation des combinaisons d’options
     if cli.generate.is_some() && cli.map_file.is_some() {
         return Err(Exit::Cli(
             "cannot use MAP_FILE together with --generate".to_string(),
@@ -81,25 +83,27 @@ fn entry(cli: Cli) -> Result<(), Exit> {
         ));
     }
 
+    // Génération map aléatoire
     if let Some(spec) = cli.generate.as_deref() {
         let (w, h) = parse_wh(spec).map_err(Exit::Cli)?;
         let grid = generate_grid(w, h);
+
         if let Some(path) = cli.output.as_deref() {
             write_grid_file(path, &grid).map_err(Exit::Runtime)?;
-            // ⚠️ runner expects EXACT substring/line:
+            // Chaîne attendue par le runner
             println!("Map saved to: {}", path.display());
         } else {
             println!("{}", format_grid(&grid));
         }
 
-        // Optionnel: si --visualize / --both sans fichier, on analyse le grid généré en mémoire
+        // Si on demande en plus une analyse/visualisation sur la map générée
         if cli.visualize || cli.both || cli.animate {
             analyze_and_print(&grid, cli.visualize, cli.both, cli.animate)?;
         }
         return Ok(());
     }
 
-    // Analyse fichier
+    // Analyse fichier existant
     let path = cli.map_file.as_ref().expect("validated");
     let content = fs::read_to_string(path)
         .map_err(|e| Exit::Runtime(format!("failed to read '{}': {e}", path.display())))?;
@@ -108,15 +112,17 @@ fn entry(cli: Cli) -> Result<(), Exit> {
     analyze_and_print(&grid, cli.visualize, cli.both, cli.animate)
 }
 
-fn analyze_and_print(grid: &Grid, visualize: bool, both: bool, animate: bool) -> Result<(), Exit> {
+fn analyze_and_print(
+    grid: &Grid,
+    visualize: bool,
+    both: bool,
+    animate: bool,
+) -> Result<(), Exit> {
     validate_grid(grid).map_err(Exit::Cli)?;
 
     println!("Analyzing hexadecimal grid...");
     println!("Grid size: {}x{}", grid.w, grid.h);
-    println!(
-        "Start: (0,0) = 0x{:02X}",
-        grid.at(0, 0).unwrap_or(0)
-    );
+    println!("Start: (0,0) = 0x{:02X}", grid.at(0, 0).unwrap_or(0));
     println!(
         "End: ({},{}) = 0x{:02X}",
         grid.w - 1,
@@ -125,29 +131,33 @@ fn analyze_and_print(grid: &Grid, visualize: bool, both: bool, animate: bool) ->
     );
     println!();
 
+    // Chemin de coût minimal (Dijkstra)
     let (min_cost, min_path) = dijkstra_min_cost(grid).map_err(Exit::Runtime)?;
 
-    // Runner minimum expectation:
     println!("MINIMUM COST PATH:");
     print_path_report(grid, min_cost, &min_path);
 
+    // Chemin de coût maximal parmi les chemins à nb de pas minimal
+    let max_res = if both {
+        max_cost_among_shortest_paths(grid)
+    } else {
+        None
+    };
+
     if both {
-        // “Maximum cost path” défini de façon calculable et robuste :
-        // maximum coût parmi les chemins à nombre de pas minimal (BFS + DP sur DAG des distances).
-        if let Some((max_cost, max_path)) = max_cost_among_shortest_paths(grid) {
-            println!();
-            println!("MAXIMUM COST PATH:");
-            print_path_report(grid, max_cost, &max_path);
+        println!();
+        println!("MAXIMUM COST PATH:");
+        if let Some((max_cost, ref max_path)) = max_res {
+            print_path_report(grid, max_cost, max_path);
         } else {
-            println!();
-            println!("MAXIMUM COST PATH:");
             println!("No path found.");
         }
     }
 
     if visualize {
         println!();
-        print_visualization(grid, &min_path, both.then(|| max_cost_among_shortest_paths(grid).map(|x| x.1)).flatten());
+        let max_path_ref = max_res.as_ref().map(|(_, p)| p.as_slice());
+        print_visualization(grid, &min_path, max_path_ref);
     }
 
     if animate {
@@ -156,6 +166,29 @@ fn analyze_and_print(grid: &Grid, visualize: bool, both: bool, animate: bool) ->
     }
 
     Ok(())
+}
+
+/*GRID / PARSING*/
+
+#[derive(Clone, Debug)]
+struct Grid {
+    w: usize,
+    h: usize,
+    cells: Vec<u8>,
+}
+
+impl Grid {
+    fn idx(&self, x: usize, y: usize) -> Option<usize> {
+        if x < self.w && y < self.h {
+            Some(y * self.w + x)
+        } else {
+            None
+        }
+    }
+
+    fn at(&self, x: usize, y: usize) -> Option<u8> {
+        self.idx(x, y).and_then(|i| self.cells.get(i).copied())
+    }
 }
 
 fn parse_wh(s: &str) -> Result<(usize, usize), String> {
@@ -175,35 +208,22 @@ fn parse_wh(s: &str) -> Result<(usize, usize), String> {
     Ok((w, h))
 }
 
-#[derive(Clone, Debug)]
-struct Grid {
-    w: usize,
-    h: usize,
-    cells: Vec<u8>,
-}
-
-impl Grid {
-    fn idx(&self, x: usize, y: usize) -> Option<usize> {
-        if x < self.w && y < self.h {
-            Some(y * self.w + x)
-        } else {
-            None
-        }
-    }
-    fn at(&self, x: usize, y: usize) -> Option<u8> {
-        self.idx(x, y).and_then(|i| self.cells.get(i).copied())
-    }
-}
-
 fn generate_grid(w: usize, h: usize) -> Grid {
     let mut rng = rand::thread_rng();
-    let mut cells = vec![0u8; w * h];
-    for c in &mut cells {
-        *c = rng.gen();
+    let mut cells = Vec::with_capacity(w * h);
+
+    for _ in 0..(w * h) {
+        let val = (rng.next_u32() & 0xFF) as u8;
+        cells.push(val);
     }
-    // Contraintes énoncé
-    cells[0] = 0x00;
-    cells[w * h - 1] = 0xFF;
+
+    // Contraintes : 00 (top-left), FF (bottom-right)
+    if let Some(first) = cells.first_mut() {
+        *first = 0x00;
+    }
+    if let Some(last) = cells.last_mut() {
+        *last = 0xFF;
+    }
     Grid { w, h, cells }
 }
 
@@ -250,8 +270,12 @@ fn parse_grid_text(content: &str) -> Result<Grid, String> {
 
         let mut row = Vec::new();
         for tok in line.split_whitespace() {
-            let t = tok.trim().trim_end_matches(',').trim_end_matches(';');
-            let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+            let t0 = tok.trim().trim_end_matches(',').trim_end_matches(';');
+            let t = t0
+                .strip_prefix("0x")
+                .or_else(|| t0.strip_prefix("0X"))
+                .unwrap_or(t0);
+
             if t.is_empty() {
                 return Err("empty hex token".to_string());
             }
@@ -262,10 +286,9 @@ fn parse_grid_text(content: &str) -> Result<Grid, String> {
                 .map_err(|_| format!("invalid hex token '{tok}' (expected 00-FF)"))?;
             row.push(v);
         }
-        if row.is_empty() {
-            continue;
+        if !row.is_empty() {
+            rows.push(row);
         }
-        rows.push(row);
     }
 
     if rows.is_empty() {
@@ -314,7 +337,7 @@ fn validate_grid(grid: &Grid) -> Result<(), String> {
     Ok(())
 }
 
-/* -------------------- MIN COST (Dijkstra) -------------------- */
+/*MIN COST (Dijkstra)*/
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct State {
@@ -324,13 +347,13 @@ struct State {
 
 impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse for min-heap behavior
         other
             .cost
             .cmp(&self.cost)
             .then_with(|| other.idx.cmp(&self.idx))
     }
 }
+
 impl PartialOrd for State {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -357,10 +380,12 @@ fn dijkstra_min_cost(grid: &Grid) -> Result<(u64, Vec<(usize, usize)>), String> 
             break;
         }
 
-        let (x, y) = (idx % grid.w, idx / grid.w);
+        let x = idx % grid.w;
+        let y = idx / grid.w;
+
         for (nx, ny) in neighbors4(x, y, grid.w, grid.h) {
             let nidx = ny * grid.w + nx;
-            let w = grid.at(nx, ny).unwrap_or(0) as u64; // entering cost
+            let w = grid.at(nx, ny).unwrap_or(0) as u64;
             let next = cost.saturating_add(w);
             if next < dist[nidx] {
                 dist[nidx] = next;
@@ -378,41 +403,24 @@ fn dijkstra_min_cost(grid: &Grid) -> Result<(u64, Vec<(usize, usize)>), String> 
     Ok((dist[goal], path))
 }
 
-fn reconstruct_path(prev: Vec<Option<usize>>, w: usize, goal: usize) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let mut cur = Some(goal);
-    while let Some(i) = cur {
-        out.push((i % w, i / w));
-        cur = prev[i];
-    }
-    out.reverse();
-    out
-}
-
-fn neighbors4(x: usize, y: usize, w: usize, h: usize) -> [(usize, usize); 4] {
-    let up = (x, y.saturating_sub(1));
-    let down = (x, (y + 1).min(h.saturating_sub(1)));
-    let left = (x.saturating_sub(1), y);
-    let right = ((x + 1).min(w.saturating_sub(1)), y);
-    [up, down, left, right]
-}
-
-/* ---- MAX COST among SHORTEST-STEP PATHS (finite + robust) ---- */
+/*MAX COST parmi les chemins à nombre de pas minimal*/
 
 fn max_cost_among_shortest_paths(grid: &Grid) -> Option<(u64, Vec<(usize, usize)>)> {
     let n = grid.w * grid.h;
     let start = 0usize;
     let goal = n - 1;
 
-    // BFS steps distance
+    // BFS pour distance en nombre de pas
     let mut step = vec![i32::MAX; n];
     let mut q = VecDeque::new();
     step[start] = 0;
     q.push_back(start);
 
     while let Some(idx) = q.pop_front() {
-        let (x, y) = (idx % grid.w, idx / grid.w);
+        let x = idx % grid.w;
+        let y = idx / grid.w;
         let d = step[idx];
+
         for (nx, ny) in neighbors4(x, y, grid.w, grid.h) {
             let nidx = ny * grid.w + nx;
             if step[nidx] == i32::MAX {
@@ -427,49 +435,49 @@ fn max_cost_among_shortest_paths(grid: &Grid) -> Option<(u64, Vec<(usize, usize)
         return None;
     }
 
-    // DP on layers by distance: for each node, best max cost reaching it via shortest steps.
-    let mut max_cost = vec![i64::MIN; n];
-    let mut prev_max: Vec<Option<usize>> = vec![None; n];
-    max_cost[start] = 0;
+    // DP pour coût max sur le DAG des distances
+    let mut best = vec![i64::MIN; n];
+    let mut prev: Vec<Option<usize>> = vec![None; n];
+    best[start] = 0;
 
-    // Collect nodes by distance for stable iteration
     let mut layers: Vec<Vec<usize>> = vec![Vec::new(); (goal_d as usize) + 1];
     for i in 0..n {
         let d = step[i];
-        if d != i32::MAX && (d as usize) < layers.len() {
+        if d != i32::MAX {
             layers[d as usize].push(i);
         }
     }
 
     for d in 0..(goal_d as usize) {
         for &idx in &layers[d] {
-            if max_cost[idx] == i64::MIN {
+            if best[idx] == i64::MIN {
                 continue;
             }
-            let (x, y) = (idx % grid.w, idx / grid.w);
+            let x = idx % grid.w;
+            let y = idx / grid.w;
             for (nx, ny) in neighbors4(x, y, grid.w, grid.h) {
                 let nidx = ny * grid.w + nx;
                 if step[nidx] == (d as i32) + 1 {
                     let add = grid.at(nx, ny).unwrap_or(0) as i64;
-                    let cand = max_cost[idx].saturating_add(add);
-                    if cand > max_cost[nidx] {
-                        max_cost[nidx] = cand;
-                        prev_max[nidx] = Some(idx);
+                    let cand = best[idx].saturating_add(add);
+                    if cand > best[nidx] {
+                        best[nidx] = cand;
+                        prev[nidx] = Some(idx);
                     }
                 }
             }
         }
     }
 
-    if max_cost[goal] == i64::MIN {
+    if best[goal] == i64::MIN {
         return None;
     }
 
-    let path = reconstruct_path(prev_max, grid.w, goal);
-    Some((max_cost[goal] as u64, path))
+    let path = reconstruct_path(prev, grid.w, goal);
+    Some((best[goal] as u64, path))
 }
 
-/* -------------------- Reporting / Visualization -------------------- */
+/*Reporting / UI*/
 
 fn print_path_report(grid: &Grid, total: u64, path: &[(usize, usize)]) {
     println!("Total cost: 0x{:X} ({} decimal)", total, total);
@@ -494,7 +502,11 @@ fn print_path_report(grid: &Grid, total: u64, path: &[(usize, usize)]) {
     println!("Total: 0x{:X} ({})", total, total);
 }
 
-fn print_visualization(grid: &Grid, min_path: &[(usize, usize)], max_path: Option<Vec<(usize, usize)>>) {
+fn print_visualization(
+    grid: &Grid,
+    min_path: &[(usize, usize)],
+    max_path: Option<&[(usize, usize)]>,
+) {
     let use_color = io::stdout().is_terminal();
 
     let mut min_mask = vec![false; grid.w * grid.h];
@@ -505,7 +517,7 @@ fn print_visualization(grid: &Grid, min_path: &[(usize, usize)], max_path: Optio
     }
 
     let mut max_mask = vec![false; grid.w * grid.h];
-    if let Some(p) = max_path.as_ref() {
+    if let Some(p) = max_path {
         for &(x, y) in p {
             if let Some(i) = grid.idx(x, y) {
                 max_mask[i] = true;
@@ -523,11 +535,12 @@ fn print_visualization(grid: &Grid, min_path: &[(usize, usize)], max_path: Optio
             let v = grid.cells[i];
 
             if use_color {
-                // Priority: max path > min path > rainbow by value
                 if max_mask[i] {
-                    print!("\x1b[31m{:02X}\x1b[0m", v); // red
+                    // chemin max en rouge
+                    print!("\x1b[31m{:02X}\x1b[0m", v);
                 } else if min_mask[i] {
-                    print!("\x1b[97m{:02X}\x1b[0m", v); // bright white
+                    // chemin min en blanc
+                    print!("\x1b[97m{:02X}\x1b[0m", v);
                 } else {
                     let c = rainbow_ansi256(v);
                     print!("\x1b[38;5;{}m{:02X}\x1b[0m", c, v);
@@ -541,8 +554,6 @@ fn print_visualization(grid: &Grid, min_path: &[(usize, usize)], max_path: Optio
 }
 
 fn rainbow_ansi256(v: u8) -> u8 {
-    // Simple mapping into 6x6x6 color cube [16..231]
-    // Map v(0..255) -> hue-ish progression along cube diagonal
     let t = v as u16;
     let r = ((t * 5) / 255) as u8;
     let g = (((t * 5) / 255 + 2) % 6) as u8;
@@ -552,24 +563,22 @@ fn rainbow_ansi256(v: u8) -> u8 {
 
 fn run_light_animation(grid: &Grid) {
     println!("Searching for minimum cost path...");
-    // Animation “lightweight”: show a few frontier expansions from BFS steps (bounded).
     let n = grid.w * grid.h;
     let mut seen = vec![false; n];
     let mut q = VecDeque::new();
-    q.push_back(0usize);
     seen[0] = true;
+    q.push_back(0usize);
 
     let mut step_no = 0usize;
     while let Some(idx) = q.pop_front() {
         step_no += 1;
-        let (x, y) = (idx % grid.w, idx / grid.w);
+        let x = idx % grid.w;
+        let y = idx / grid.w;
         println!("Step {}: Exploring ({},{})", step_no, x, y);
-
         if step_no >= 8 {
             println!("[Animation continues...]");
             break;
         }
-
         for (nx, ny) in neighbors4(x, y, grid.w, grid.h) {
             let nidx = ny * grid.w + nx;
             if !seen[nidx] {
@@ -580,7 +589,7 @@ fn run_light_animation(grid: &Grid) {
     }
 }
 
-/* -------------------- Utils -------------------- */
+/*util*/
 
 fn neighbors4(x: usize, y: usize, w: usize, h: usize) -> Vec<(usize, usize)> {
     let mut out = Vec::with_capacity(4);
